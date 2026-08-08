@@ -96,10 +96,10 @@ jobs:
           {
             "## Windows x64 Release package"
             ""
-            "- source: \`$env:SOURCE_SHA\`"
-            "- file version: \`$version\`"
-            "- SHA-256: \`$hash\`"
-            "- configuration: \`Release|x64\`"
+            "- source: $env:SOURCE_SHA"
+            "- file version: $version"
+            "- SHA-256: $hash"
+            "- configuration: Release|x64"
           } >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload workflow artifact
