@@ -1,0 +1,145 @@
+name: Build upstream master Windows x64 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact commit from the mirrored official master branch.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-upstream-master-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and publish Windows x64 Release
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 180
+
+    steps:
+      - name: Validate requested source revision
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ($env:SOURCE_SHA -notmatch "^[0-9a-f]{40}$") {
+            throw "source_sha must be a full 40-character Git commit SHA."
+          }
+
+          $mirrored = (
+            git ls-remote "https://github.com/${{ github.repository }}.git" "refs/heads/upstream-master"
+          ).Split()[0]
+
+          if ($mirrored -ne $env:SOURCE_SHA) {
+            throw "source_sha is not the current upstream-master revision."
+          }
+
+      - name: Check out pinned source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Generate embedded documentation
+        shell: pwsh
+        run: bun .\cmd\gen-docs.ts
+
+      - name: Build Release x64 binaries
+        shell: pwsh
+        run: bun .\cmd\build-all.ts
+
+      - name: Package and verify standalone Release executable
+        id: package
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $source = "out\rel64\SumatraPDF-static.exe"
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Release executable was not produced: $source"
+          }
+
+          $shortSha = $env:SOURCE_SHA.Substring(0, 7)
+          $assetName = "SumatraPDF-$shortSha-windows-x64-release.exe"
+          $asset = Join-Path $env:RUNNER_TEMP $assetName
+          Copy-Item -LiteralPath $source -Destination $asset
+
+          $version = (Get-Item -LiteralPath $asset).VersionInfo.FileVersion
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "The Release executable has no file version."
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
+          $checksumName = "$assetName.sha256"
+          $checksum = Join-Path $env:RUNNER_TEMP $checksumName
+          "$hash  $assetName" | Set-Content -Encoding ascii -NoNewline $checksum
+
+          "asset=$asset" >> $env:GITHUB_OUTPUT
+          "asset_name=$assetName" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+          "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+          {
+            "## Windows x64 Release package"
+            ""
+            "- source: \`$env:SOURCE_SHA\`"
+            "- file version: \`$version\`"
+            "- SHA-256: \`$hash\`"
+            "- configuration: \`Release|x64\`"
+          } >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-release
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create or update GitHub pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ASSET: ${{ steps.package.outputs.asset }}
+          ASSET_NAME: ${{ steps.package.outputs.asset_name }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          SHORT_SHA: ${{ steps.package.outputs.short_sha }}
+          FILE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = "sumatrapdf-master-$env:SHORT_SHA"
+          $title = "SumatraPDF master $env:SHORT_SHA (Windows x64 Release)"
+          $notes = @"
+          Automated Windows x64 Release build from the official SumatraPDF master branch.
+
+          Source commit: $env:SOURCE_SHA
+          File version: $env:FILE_VERSION
+          Build configuration: Release|x64 (not Debug)
+
+          The executable is the standalone static build. Verify it with the accompanying SHA-256 file.
+          "@
+
+          if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --prerelease
+            gh release upload $tag $env:ASSET $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $env:ASSET $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --prerelease
+          }
