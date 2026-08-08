@@ -1,4 +1,4 @@
-name: Build upstream master Windows x64 Release
+name: Build upstream master Windows x64 optimized Release
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and publish Windows x64 Release
+    name: Build and publish optimized Windows x64 Release
     runs-on: windows-2025-vs2026
     timeout-minutes: 180
 
@@ -54,11 +54,17 @@ jobs:
         shell: pwsh
         run: bun .\cmd\gen-docs.ts
 
-      - name: Build Release x64 binaries
+      - name: Build maximally optimized Release x64 binaries
         shell: pwsh
+        env:
+          # Release already supplies /O1, /GL, /Gy, /GF and full LTCG.
+          # /Gw lets /OPT:REF remove unused global data; extra ICF passes fold
+          # more identical COMDATs without requiring a newer CPU at runtime.
+          CL: /Gw /Zc:inline
+          LINK: /OPT:REF /OPT:ICF=10 /LTCG
         run: bun .\cmd\build-all.ts
 
-      - name: Package and verify standalone Release executable
+      - name: Package and verify optimized standalone Release executable
         id: package
         shell: pwsh
         env:
@@ -72,7 +78,7 @@ jobs:
           }
 
           $shortSha = $env:SOURCE_SHA.Substring(0, 7)
-          $assetName = "SumatraPDF-$shortSha-windows-x64-release.exe"
+          $assetName = "SumatraPDF-$shortSha-windows-x64-release-optimized.exe"
           $asset = Join-Path $env:RUNNER_TEMP $assetName
           Copy-Item -LiteralPath $source -Destination $asset
 
@@ -81,33 +87,76 @@ jobs:
             throw "The Release executable has no file version."
           }
 
+          $sevenZipCommand = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+          $sevenZip = if ($sevenZipCommand) {
+            $sevenZipCommand.Source
+          } else {
+            Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          }
+
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            throw "7-Zip executable was not found: $sevenZip"
+          }
+
+          $archiveName = "SumatraPDF-$shortSha-windows-x64-release-optimized.7z"
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & $sevenZip a "-t7z" "-mx=9" "-m0=lzma2" "-md=512m" "-mfb=273" "-ms=on" "-mmt=on" $archiveName $assetName
+            if ($LASTEXITCODE -ne 0) {
+              throw "7-Zip maximum compression failed: exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+          & $sevenZip t $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip archive verification failed: exit code $LASTEXITCODE"
+          }
+
+          if ((Get-Item -LiteralPath $archive).Length -ge (Get-Item -LiteralPath $asset).Length) {
+            throw "The maximum-compression archive is not smaller than the executable."
+          }
+
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
-          $checksumName = "$assetName.sha256"
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          $checksumName = "SumatraPDF-$shortSha-windows-x64-release-optimized-SHA256SUMS.txt"
           $checksum = Join-Path $env:RUNNER_TEMP $checksumName
-          "$hash  $assetName" | Set-Content -Encoding ascii -NoNewline $checksum
+          @(
+            "$hash  $assetName"
+            "$archiveHash  $archiveName"
+          ) | Set-Content -Encoding ascii $checksum
 
           "asset=$asset" >> $env:GITHUB_OUTPUT
           "asset_name=$assetName" >> $env:GITHUB_OUTPUT
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
           "checksum=$checksum" >> $env:GITHUB_OUTPUT
           "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
           "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
 
           {
-            "## Windows x64 Release package"
+            "## Optimized Windows x64 Release package"
             ""
             "- source: $env:SOURCE_SHA"
             "- file version: $version"
             "- SHA-256: $hash"
             "- configuration: Release|x64"
+            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline"
+            "- linker: /LTCG /OPT:REF /OPT:ICF=10"
+            "- archive: 7z LZMA2 maximum compression"
           } >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-release
+          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-release-optimized
           path: |
             ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
           if-no-files-found: error
           retention-days: 30
@@ -119,27 +168,31 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           ASSET: ${{ steps.package.outputs.asset }}
           ASSET_NAME: ${{ steps.package.outputs.asset_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
           CHECKSUM: ${{ steps.package.outputs.checksum }}
           SHORT_SHA: ${{ steps.package.outputs.short_sha }}
           FILE_VERSION: ${{ steps.package.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $tag = "sumatrapdf-master-$env:SHORT_SHA"
-          $title = "SumatraPDF master $env:SHORT_SHA (Windows x64 Release)"
+          $tag = "sumatrapdf-master-$env:SHORT_SHA-optimized"
+          $title = "SumatraPDF master $env:SHORT_SHA (optimized Windows x64 Release)"
           $notes = @"
           Automated Windows x64 Release build from the official SumatraPDF master branch.
 
           Source commit: $env:SOURCE_SHA
           File version: $env:FILE_VERSION
           Build configuration: Release|x64 (not Debug)
+          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline
+          Link optimization: /LTCG /OPT:REF /OPT:ICF=10
 
-          The executable is the standalone static build. Verify it with the accompanying SHA-256 file.
+          The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
           "@
 
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
             gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --prerelease
-            gh release upload $tag $env:ASSET $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $env:ASSET $env:ARCHIVE $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $tag $env:ASSET $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --prerelease
+            gh release create $tag $env:ASSET $env:ARCHIVE $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --prerelease
           }
