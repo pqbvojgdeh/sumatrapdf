@@ -1,4 +1,4 @@
-name: Build upstream master Windows x64 optimized Release
+name: Build upstream master Windows x64 AVX2 optimized Release
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and publish optimized Windows x64 Release
+    name: Build and publish AVX2 optimized Windows x64 Release
     runs-on: windows-2025-vs2026
     timeout-minutes: 180
 
@@ -54,17 +54,17 @@ jobs:
         shell: pwsh
         run: bun .\cmd\gen-docs.ts
 
-      - name: Build maximally optimized Release x64 binaries
+      - name: Build maximally optimized AVX2 Release x64 binaries
         shell: pwsh
         env:
           # Release already supplies /O1, /GL, /Gy, /GF and full LTCG.
           # /Gw lets /OPT:REF remove unused global data; extra ICF passes fold
           # more identical COMDATs without requiring a newer CPU at runtime.
-          CL: /Gw /Zc:inline
+          CL: /Gw /Zc:inline /arch:AVX2
           LINK: /OPT:REF /OPT:ICF=10 /LTCG
         run: bun .\cmd\build-all.ts
 
-      - name: Package and verify optimized standalone Release executable
+      - name: Package and verify AVX2 optimized standalone Release executable
         id: package
         shell: pwsh
         env:
@@ -78,7 +78,7 @@ jobs:
           }
 
           $shortSha = $env:SOURCE_SHA.Substring(0, 7)
-          $assetName = "SumatraPDF-$shortSha-windows-x64-release-optimized.exe"
+          $assetName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized.exe"
           $asset = Join-Path $env:RUNNER_TEMP $assetName
           Copy-Item -LiteralPath $source -Destination $asset
 
@@ -98,7 +98,7 @@ jobs:
             throw "7-Zip executable was not found: $sevenZip"
           }
 
-          $archiveName = "SumatraPDF-$shortSha-windows-x64-release-optimized.7z"
+          $archiveName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized.7z"
           $archive = Join-Path $env:RUNNER_TEMP $archiveName
 
           Push-Location $env:RUNNER_TEMP
@@ -122,7 +122,7 @@ jobs:
 
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
           $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          $checksumName = "SumatraPDF-$shortSha-windows-x64-release-optimized-SHA256SUMS.txt"
+          $checksumName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized-SHA256SUMS.txt"
           $checksum = Join-Path $env:RUNNER_TEMP $checksumName
           @(
             "$hash  $assetName"
@@ -139,13 +139,13 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
           {
-            "## Optimized Windows x64 Release package"
+            "## AVX2 optimized Windows x64 Release package"
             ""
             "- source: $env:SOURCE_SHA"
             "- file version: $version"
             "- SHA-256: $hash"
             "- configuration: Release|x64"
-            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline"
+            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline /arch:AVX2"
             "- linker: /LTCG /OPT:REF /OPT:ICF=10"
             "- archive: 7z LZMA2 maximum compression"
           } >> $env:GITHUB_STEP_SUMMARY
@@ -153,7 +153,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-release-optimized
+          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-avx2-release-optimized
           path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.archive }}
@@ -176,18 +176,18 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $tag = "sumatrapdf-master-$env:SHORT_SHA-optimized"
-          $title = "SumatraPDF master $env:SHORT_SHA (optimized Windows x64 Release)"
+          $tag = "sumatrapdf-master-$env:SHORT_SHA-avx2-optimized"
+          $title = "SumatraPDF master $env:SHORT_SHA (AVX2 optimized Windows x64 Release)"
           $notes = @"
           Automated Windows x64 Release build from the official SumatraPDF master branch.
 
           Source commit: $env:SOURCE_SHA
           File version: $env:FILE_VERSION
           Build configuration: Release|x64 (not Debug)
-          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline
+          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline /arch:AVX2
           Link optimization: /LTCG /OPT:REF /OPT:ICF=10
 
-          The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
+          This build requires a processor with AVX2 support. The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
           "@
 
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
