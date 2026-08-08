@@ -1,4 +1,6 @@
-name: Build upstream master Windows x64 AVX2 optimized Release
+name: Build upstream master Windows x64 optimized Releases
+
+run-name: Build ${{ inputs.cpu_target }} optimized Release for ${{ inputs.source_sha }}
 
 on:
   workflow_dispatch:
@@ -7,17 +9,25 @@ on:
         description: Exact commit from the mirrored official master branch.
         required: true
         type: string
+      cpu_target:
+        description: Portable x64 baseline or AVX2.
+        required: true
+        default: generic
+        type: choice
+        options:
+          - generic
+          - avx2
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-upstream-master-${{ inputs.source_sha }}
+  group: build-upstream-master-${{ inputs.source_sha }}-${{ inputs.cpu_target }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build and publish AVX2 optimized Windows x64 Release
+    name: Build and publish ${{ inputs.cpu_target }} optimized Windows x64 Release
     runs-on: windows-2025-vs2026
     timeout-minutes: 180
 
@@ -26,11 +36,16 @@ jobs:
         shell: pwsh
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CPU_TARGET: ${{ inputs.cpu_target }}
         run: |
           $ErrorActionPreference = "Stop"
 
           if ($env:SOURCE_SHA -notmatch "^[0-9a-f]{40}$") {
             throw "source_sha must be a full 40-character Git commit SHA."
+          }
+
+          if ($env:CPU_TARGET -notin @("generic", "avx2")) {
+            throw "cpu_target must be generic or avx2."
           }
 
           $mirrored = (
@@ -54,21 +69,22 @@ jobs:
         shell: pwsh
         run: bun .\cmd\gen-docs.ts
 
-      - name: Build maximally optimized AVX2 Release x64 binaries
+      - name: Build maximally optimized ${{ inputs.cpu_target }} Release x64 binaries
         shell: pwsh
         env:
           # Release already supplies /O1, /GL, /Gy, /GF and full LTCG.
           # /Gw lets /OPT:REF remove unused global data; extra ICF passes fold
           # more identical COMDATs without requiring a newer CPU at runtime.
-          CL: /Gw /Zc:inline /arch:AVX2
+          CL: /Gw /Zc:inline ${{ inputs.cpu_target == 'avx2' && '/arch:AVX2' || '' }}
           LINK: /OPT:REF /OPT:ICF=10 /LTCG
         run: bun .\cmd\build-all.ts
 
-      - name: Package and verify AVX2 optimized standalone Release executable
+      - name: Package and verify ${{ inputs.cpu_target }} optimized standalone Release executable
         id: package
         shell: pwsh
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CPU_TARGET: ${{ inputs.cpu_target }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -78,7 +94,10 @@ jobs:
           }
 
           $shortSha = $env:SOURCE_SHA.Substring(0, 7)
-          $assetName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized.exe"
+          $cpuSlug = if ($env:CPU_TARGET -eq "avx2") { "-avx2" } else { "" }
+          $cpuTitle = if ($env:CPU_TARGET -eq "avx2") { "AVX2 optimized" } else { "optimized" }
+          $archFlag = if ($env:CPU_TARGET -eq "avx2") { " /arch:AVX2" } else { "" }
+          $assetName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized.exe"
           $asset = Join-Path $env:RUNNER_TEMP $assetName
           Copy-Item -LiteralPath $source -Destination $asset
 
@@ -98,7 +117,7 @@ jobs:
             throw "7-Zip executable was not found: $sevenZip"
           }
 
-          $archiveName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized.7z"
+          $archiveName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized.7z"
           $archive = Join-Path $env:RUNNER_TEMP $archiveName
 
           Push-Location $env:RUNNER_TEMP
@@ -122,7 +141,7 @@ jobs:
 
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
           $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-          $checksumName = "SumatraPDF-$shortSha-windows-x64-avx2-release-optimized-SHA256SUMS.txt"
+          $checksumName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized-SHA256SUMS.txt"
           $checksum = Join-Path $env:RUNNER_TEMP $checksumName
           @(
             "$hash  $assetName"
@@ -137,15 +156,17 @@ jobs:
           "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
           "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
+          "cpu_target=$env:CPU_TARGET" >> $env:GITHUB_OUTPUT
 
           {
-            "## AVX2 optimized Windows x64 Release package"
+            "## $cpuTitle Windows x64 Release package"
             ""
             "- source: $env:SOURCE_SHA"
             "- file version: $version"
             "- SHA-256: $hash"
             "- configuration: Release|x64"
-            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline /arch:AVX2"
+            "- CPU target: $env:CPU_TARGET"
+            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline$archFlag"
             "- linker: /LTCG /OPT:REF /OPT:ICF=10"
             "- archive: 7z LZMA2 maximum compression"
           } >> $env:GITHUB_STEP_SUMMARY
@@ -153,7 +174,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:
-          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-avx2-release-optimized
+          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-${{ steps.package.outputs.cpu_target }}-release-optimized
           path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.archive }}
@@ -173,21 +194,33 @@ jobs:
           CHECKSUM: ${{ steps.package.outputs.checksum }}
           SHORT_SHA: ${{ steps.package.outputs.short_sha }}
           FILE_VERSION: ${{ steps.package.outputs.version }}
+          CPU_TARGET: ${{ inputs.cpu_target }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $tag = "sumatrapdf-master-$env:SHORT_SHA-avx2-optimized"
-          $title = "SumatraPDF master $env:SHORT_SHA (AVX2 optimized Windows x64 Release)"
+          $cpuSuffix = if ($env:CPU_TARGET -eq "avx2") { "-avx2" } else { "" }
+          $cpuTitle = if ($env:CPU_TARGET -eq "avx2") { "AVX2 optimized" } else { "optimized" }
+          $archFlag = if ($env:CPU_TARGET -eq "avx2") { " /arch:AVX2" } else { "" }
+          $compatibility = if ($env:CPU_TARGET -eq "avx2") {
+            "This build requires a processor with AVX2 support."
+          } else {
+            "This build uses the portable Windows x64 CPU baseline."
+          }
+          $tag = "sumatrapdf-master-$env:SHORT_SHA$cpuSuffix-optimized"
+          $title = "SumatraPDF master $env:SHORT_SHA ($cpuTitle Windows x64 Release)"
           $notes = @"
           Automated Windows x64 Release build from the official SumatraPDF master branch.
 
           Source commit: $env:SOURCE_SHA
           File version: $env:FILE_VERSION
           Build configuration: Release|x64 (not Debug)
-          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline /arch:AVX2
+          CPU target: $env:CPU_TARGET
+          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline$archFlag
           Link optimization: /LTCG /OPT:REF /OPT:ICF=10
 
-          This build requires a processor with AVX2 support. The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
+          $compatibility
+
+          The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
           "@
 
           if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
