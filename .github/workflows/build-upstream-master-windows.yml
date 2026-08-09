@@ -282,7 +282,7 @@ jobs:
             gh release upload "$tag" "${desired[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
-          } else {
+          else
             gh release create "$tag" "${desired[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$SOURCE_SHA" \
