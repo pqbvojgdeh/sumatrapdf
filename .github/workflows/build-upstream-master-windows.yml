@@ -1,0 +1,302 @@
+name: Build upstream master Windows x64 optimized Releases
+
+run-name: Build generic and AVX2 optimized Releases for ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact commit from the mirrored official master branch.
+        required: true
+        type: string
+permissions:
+  contents: write
+
+concurrency:
+  group: build-upstream-master-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.cpu_target }} optimized Windows x64 Release
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu_target:
+          - generic
+          - avx2
+
+    steps:
+      - name: Validate requested source revision
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CPU_TARGET: ${{ matrix.cpu_target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ($env:SOURCE_SHA -notmatch "^[0-9a-f]{40}$") {
+            throw "source_sha must be a full 40-character Git commit SHA."
+          }
+
+          if ($env:CPU_TARGET -notin @("generic", "avx2")) {
+            throw "cpu_target must be generic or avx2."
+          }
+
+          $mirrored = (
+            git ls-remote "https://github.com/${{ github.repository }}.git" "refs/heads/upstream-master"
+          ).Split()[0]
+
+          if ($mirrored -ne $env:SOURCE_SHA) {
+            throw "source_sha is not the current upstream-master revision."
+          }
+
+      - name: Check out pinned source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Generate embedded documentation
+        shell: pwsh
+        run: bun .\cmd\gen-docs.ts
+
+      - name: Build maximally optimized ${{ matrix.cpu_target }} Release x64 binaries
+        shell: pwsh
+        env:
+          # Release already supplies /O1, /GL, /Gy, /GF and full LTCG.
+          # /Gw lets /OPT:REF remove unused global data; extra ICF passes fold
+          # more identical COMDATs without requiring a newer CPU at runtime.
+          CL: /Gw /Zc:inline ${{ matrix.cpu_target == 'avx2' && '/arch:AVX2' || '' }}
+          LINK: /OPT:REF /OPT:ICF=10 /LTCG
+        run: bun .\cmd\build-all.ts
+
+      - name: Package and verify ${{ matrix.cpu_target }} optimized Release archive
+        id: package
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CPU_TARGET: ${{ matrix.cpu_target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $source = "out\rel64\SumatraPDF-static.exe"
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Release executable was not produced: $source"
+          }
+
+          $shortSha = $env:SOURCE_SHA.Substring(0, 7)
+          $cpuSlug = if ($env:CPU_TARGET -eq "avx2") { "-avx2" } else { "" }
+          $cpuTitle = if ($env:CPU_TARGET -eq "avx2") { "AVX2 optimized" } else { "optimized" }
+          $archFlag = if ($env:CPU_TARGET -eq "avx2") { " /arch:AVX2" } else { "" }
+          $assetName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized.exe"
+          $asset = Join-Path $env:RUNNER_TEMP $assetName
+          Copy-Item -LiteralPath $source -Destination $asset
+
+          $version = (Get-Item -LiteralPath $asset).VersionInfo.FileVersion
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "The Release executable has no file version."
+          }
+
+          $sevenZipCommand = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+          $sevenZip = if ($sevenZipCommand) {
+            $sevenZipCommand.Source
+          } else {
+            Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          }
+
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            throw "7-Zip executable was not found: $sevenZip"
+          }
+
+          $archiveName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized.7z"
+          $archive = Join-Path $env:RUNNER_TEMP $archiveName
+
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & $sevenZip a "-t7z" "-mx=9" "-m0=lzma2" "-md=512m" "-mfb=273" "-ms=on" "-mmt=on" $archiveName $assetName
+            if ($LASTEXITCODE -ne 0) {
+              throw "7-Zip maximum compression failed: exit code $LASTEXITCODE"
+            }
+          } finally {
+            Pop-Location
+          }
+
+          & $sevenZip t $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip archive verification failed: exit code $LASTEXITCODE"
+          }
+
+          if ((Get-Item -LiteralPath $archive).Length -ge (Get-Item -LiteralPath $asset).Length) {
+            throw "The maximum-compression archive is not smaller than the executable."
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          $checksumName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized-SHA256SUMS.txt"
+          $checksum = Join-Path $env:RUNNER_TEMP $checksumName
+          @(
+            "$archiveHash  $archiveName"
+          ) | Set-Content -Encoding ascii $checksum
+
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
+          "checksum=$checksum" >> $env:GITHUB_OUTPUT
+          "checksum_name=$checksumName" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "cpu_target=$env:CPU_TARGET" >> $env:GITHUB_OUTPUT
+
+          {
+            "## $cpuTitle Windows x64 Release package"
+            ""
+            "- source: $env:SOURCE_SHA"
+            "- file version: $version"
+            "- SHA-256: $hash"
+            "- configuration: Release|x64"
+            "- CPU target: $env:CPU_TARGET"
+            "- compiler: /O1 /GL /Gy /GF /Gw /Zc:inline$archFlag"
+            "- linker: /LTCG /OPT:REF /OPT:ICF=10"
+            "- archive: 7z LZMA2 maximum compression"
+          } >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-${{ steps.package.outputs.cpu_target }}-release-optimized
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish one combined GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download generic and AVX2 packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: sumatrapdf-*-windows-x64-*-release-optimized
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify packages and create or update one GitHub pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${SOURCE_SHA:0:7}"
+          generic="SumatraPDF-$short_sha-windows-x64-release-optimized"
+          avx2="SumatraPDF-$short_sha-windows-x64-avx2-release-optimized"
+          combined_sums="SumatraPDF-$short_sha-windows-x64-optimized-SHA256SUMS.txt"
+          tag="sumatrapdf-master-$short_sha-optimized"
+          title="$short_sha upstream optimized"
+
+          cd release-assets
+
+          expected=(
+            "$generic.7z"
+            "$generic-SHA256SUMS.txt"
+            "$avx2.7z"
+            "$avx2-SHA256SUMS.txt"
+          )
+
+          for file in "${expected[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "::error::Expected package file is missing or empty: $file"
+              exit 1
+            fi
+          done
+
+          sha256sum -c "$generic-SHA256SUMS.txt"
+          sha256sum -c "$avx2-SHA256SUMS.txt"
+
+          sha256sum \
+            "$generic.7z" \
+            "$avx2.7z" > "$combined_sums"
+
+          rm "$generic-SHA256SUMS.txt" "$avx2-SHA256SUMS.txt"
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Automated optimized Windows x64 Release builds from the exact mirrored official SumatraPDF master commit.
+
+          Source commit: $SOURCE_SHA
+          Build configuration: Release|x64 (not Debug)
+          Common optimization: /O1 /GL /Gy /GF /Gw /Zc:inline and /LTCG /OPT:REF /OPT:ICF=10
+
+          Assets in this release:
+          - Generic optimized x64: portable Windows x64 CPU baseline.
+          - AVX2 optimized x64: requires a processor with AVX2 support.
+
+          Each 7z archive contains one standalone static executable and uses maximum LZMA2 compression. Verify both archives with the combined SHA256SUMS asset.
+          EOF
+
+          desired=(
+            "$generic.7z"
+            "$avx2.7z"
+            "$combined_sums"
+          )
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease=false \
+              --latest
+
+            mapfile -t existing_assets < <(
+              gh release view "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json assets \
+                --jq '.assets[].name'
+            )
+
+            for existing in "${existing_assets[@]}"; do
+              keep=false
+              for wanted in "${desired[@]}"; do
+                if [[ "$existing" == "$wanted" ]]; then
+                  keep=true
+                  break
+                fi
+              done
+
+              if [[ "$keep" == "false" ]]; then
+                gh release delete-asset "$tag" "$existing" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --yes
+              fi
+            done
+
+            gh release upload "$tag" "${desired[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$tag" "${desired[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "$title" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --latest
+          fi
+
+          {
+            echo "## Combined optimized Windows x64 Release"
+            echo
+            echo "- source: \`$SOURCE_SHA\`"
+            echo "- generic and AVX2 packages: verified"
+            echo "- release tag: \`$tag\`"
+            echo "- published assets: ${#desired[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"

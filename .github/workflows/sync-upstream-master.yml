@@ -1,0 +1,87 @@
+name: Sync official upstream master
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 00:00 Asia/Krasnoyarsk (UTC+7).
+    - cron: "0 17 * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-official-upstream-master
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror official master when changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out automation branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Fetch official master and detect changes
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote add official https://github.com/sumatrapdfreader/sumatrapdf.git
+          git fetch --no-tags official +refs/heads/master:refs/remotes/official/master
+
+          official_sha="$(git rev-parse refs/remotes/official/master)"
+          current_sha="$(
+            git ls-remote origin refs/heads/upstream-master |
+            awk '{ print $1 }'
+          )"
+
+          echo "Official master SHA: $official_sha"
+          echo "Current mirror SHA:  ${current_sha:-<missing>}"
+          echo "official_sha=$official_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$current_sha" == "$official_sha" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git push origin +refs/remotes/official/master:refs/heads/upstream-master
+
+            mirrored_sha="$(
+              git ls-remote origin refs/heads/upstream-master |
+              awk '{ print $1 }'
+            )"
+
+            if [[ "$mirrored_sha" != "$official_sha" ]]; then
+              echo "::error::upstream-master does not match official master."
+              exit 1
+            fi
+
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "## Upstream master sync"
+            echo
+            echo "- previous mirror: \`${current_sha:-missing}\`"
+            echo "- official master: \`$official_sha\`"
+            echo "- changed: $([[ "$current_sha" == "$official_sha" ]] && echo no || echo yes)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start combined generic and AVX2 optimized Windows x64 Release build
+        if: steps.sync.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run build-upstream-master-windows.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f "source_sha=${{ steps.sync.outputs.official_sha }}"
+
+          echo "Combined generic and AVX2 optimized Release build dispatched for ${{ steps.sync.outputs.official_sha }}."
