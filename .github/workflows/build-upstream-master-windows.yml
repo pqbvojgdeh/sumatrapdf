@@ -76,7 +76,7 @@ jobs:
           LINK: /OPT:REF /OPT:ICF=10 /LTCG
         run: bun .\cmd\build-all.ts
 
-      - name: Package and verify ${{ matrix.cpu_target }} optimized standalone Release executable
+      - name: Package and verify ${{ matrix.cpu_target }} optimized Release archive
         id: package
         shell: pwsh
         env:
@@ -141,12 +141,9 @@ jobs:
           $checksumName = "SumatraPDF-$shortSha-windows-x64$cpuSlug-release-optimized-SHA256SUMS.txt"
           $checksum = Join-Path $env:RUNNER_TEMP $checksumName
           @(
-            "$hash  $assetName"
             "$archiveHash  $archiveName"
           ) | Set-Content -Encoding ascii $checksum
 
-          "asset=$asset" >> $env:GITHUB_OUTPUT
-          "asset_name=$assetName" >> $env:GITHUB_OUTPUT
           "archive=$archive" >> $env:GITHUB_OUTPUT
           "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
           "checksum=$checksum" >> $env:GITHUB_OUTPUT
@@ -173,7 +170,6 @@ jobs:
         with:
           name: sumatrapdf-${{ steps.package.outputs.short_sha }}-windows-x64-${{ steps.package.outputs.cpu_target }}-release-optimized
           path: |
-            ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
           if-no-files-found: error
@@ -211,10 +207,8 @@ jobs:
           cd release-assets
 
           expected=(
-            "$generic.exe"
             "$generic.7z"
             "$generic-SHA256SUMS.txt"
-            "$avx2.exe"
             "$avx2.7z"
             "$avx2-SHA256SUMS.txt"
           )
@@ -230,9 +224,7 @@ jobs:
           sha256sum -c "$avx2-SHA256SUMS.txt"
 
           sha256sum \
-            "$generic.exe" \
             "$generic.7z" \
-            "$avx2.exe" \
             "$avx2.7z" > "$combined_sums"
 
           rm "$generic-SHA256SUMS.txt" "$avx2-SHA256SUMS.txt"
@@ -248,13 +240,11 @@ jobs:
           - Generic optimized x64: portable Windows x64 CPU baseline.
           - AVX2 optimized x64: requires a processor with AVX2 support.
 
-          Both executables are standalone static builds. The 7z assets use maximum LZMA2 compression. Verify all files with the combined SHA256SUMS asset.
+          Each 7z archive contains one standalone static executable and uses maximum LZMA2 compression. Verify both archives with the combined SHA256SUMS asset.
           EOF
 
           desired=(
-            "$generic.exe"
             "$generic.7z"
-            "$avx2.exe"
             "$avx2.7z"
             "$combined_sums"
           )
