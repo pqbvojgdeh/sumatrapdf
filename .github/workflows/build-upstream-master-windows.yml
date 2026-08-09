@@ -176,7 +176,7 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Publish one combined GitHub pre-release
+    name: Publish one combined GitHub release
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -254,7 +254,8 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "$title" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --prerelease
+              --prerelease=false \
+              --latest
 
             mapfile -t existing_assets < <(
               gh release view "$tag" \
@@ -288,7 +289,7 @@ jobs:
               --target "$SOURCE_SHA" \
               --title "$title" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --prerelease
+              --latest
           fi
 
           {
