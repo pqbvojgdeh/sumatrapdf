@@ -202,7 +202,7 @@ jobs:
           avx2="SumatraPDF-$short_sha-windows-x64-avx2-release-optimized"
           combined_sums="SumatraPDF-$short_sha-windows-x64-optimized-SHA256SUMS.txt"
           tag="sumatrapdf-master-$short_sha-optimized"
-          title="$short_sha upstream optimized"
+          title="$short_sha"
 
           cd release-assets
 
@@ -230,17 +230,10 @@ jobs:
           rm "$generic-SHA256SUMS.txt" "$avx2-SHA256SUMS.txt"
 
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          Automated optimized Windows x64 Release builds from the exact mirrored official SumatraPDF master commit.
+          Source: https://github.com/sumatrapdfreader/sumatrapdf/commit/$SOURCE_SHA
 
-          Source commit: $SOURCE_SHA
-          Build configuration: Release|x64 (not Debug)
-          Common optimization: /O1 /GL /Gy /GF /Gw /Zc:inline and /LTCG /OPT:REF /OPT:ICF=10
-
-          Assets in this release:
-          - Generic optimized x64: portable Windows x64 CPU baseline.
-          - AVX2 optimized x64: requires a processor with AVX2 support.
-
-          Each 7z archive contains one standalone static executable and uses maximum LZMA2 compression. Verify both archives with the combined SHA256SUMS asset.
+          - Windows x64: standard build for 64-bit Windows.
+          - Windows x64 AVX2: for processors with AVX2 support.
           EOF
 
           desired=(
