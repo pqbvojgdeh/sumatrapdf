@@ -292,6 +292,35 @@ jobs:
               --latest
           fi
 
+          mapfile -t obsolete_tags < <(
+            gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 1000 \
+              --json tagName \
+              --jq ".[] | select(.tagName != \"$tag\") | .tagName"
+          )
+
+          for obsolete_tag in "${obsolete_tags[@]}"; do
+            gh release delete "$obsolete_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cleanup-tag \
+              --yes
+          done
+
+          mapfile -t remaining_tags < <(
+            gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 1000 \
+              --json tagName \
+              --jq '.[].tagName'
+          )
+
+          if [[ "${#remaining_tags[@]}" -ne 1 || "${remaining_tags[0]}" != "$tag" ]]; then
+            echo "::error::Release retention verification failed."
+            printf 'Remaining release tag: %s\n' "${remaining_tags[@]}"
+            exit 1
+          fi
+
           {
             echo "## Combined optimized Windows x64 Release"
             echo
@@ -299,4 +328,5 @@ jobs:
             echo "- generic and AVX2 packages: verified"
             echo "- release tag: \`$tag\`"
             echo "- published assets: ${#desired[@]}"
+            echo "- obsolete releases deleted: ${#obsolete_tags[@]}"
           } >> "$GITHUB_STEP_SUMMARY"
