@@ -1,6 +1,6 @@
 name: Build upstream master Windows x64 optimized Releases
 
-run-name: Build ${{ inputs.cpu_target }} optimized Release for ${{ inputs.source_sha }}
+run-name: Build generic and AVX2 optimized Releases for ${{ inputs.source_sha }}
 
 on:
   workflow_dispatch:
@@ -9,34 +9,31 @@ on:
         description: Exact commit from the mirrored official master branch.
         required: true
         type: string
-      cpu_target:
-        description: Portable x64 baseline or AVX2.
-        required: true
-        default: generic
-        type: choice
-        options:
-          - generic
-          - avx2
-
 permissions:
   contents: write
 
 concurrency:
-  group: build-upstream-master-${{ inputs.source_sha }}-${{ inputs.cpu_target }}
+  group: build-upstream-master-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build and publish ${{ inputs.cpu_target }} optimized Windows x64 Release
+    name: Build ${{ matrix.cpu_target }} optimized Windows x64 Release
     runs-on: windows-2025-vs2026
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu_target:
+          - generic
+          - avx2
 
     steps:
       - name: Validate requested source revision
         shell: pwsh
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-          CPU_TARGET: ${{ inputs.cpu_target }}
+          CPU_TARGET: ${{ matrix.cpu_target }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -69,22 +66,22 @@ jobs:
         shell: pwsh
         run: bun .\cmd\gen-docs.ts
 
-      - name: Build maximally optimized ${{ inputs.cpu_target }} Release x64 binaries
+      - name: Build maximally optimized ${{ matrix.cpu_target }} Release x64 binaries
         shell: pwsh
         env:
           # Release already supplies /O1, /GL, /Gy, /GF and full LTCG.
           # /Gw lets /OPT:REF remove unused global data; extra ICF passes fold
           # more identical COMDATs without requiring a newer CPU at runtime.
-          CL: /Gw /Zc:inline ${{ inputs.cpu_target == 'avx2' && '/arch:AVX2' || '' }}
+          CL: /Gw /Zc:inline ${{ matrix.cpu_target == 'avx2' && '/arch:AVX2' || '' }}
           LINK: /OPT:REF /OPT:ICF=10 /LTCG
         run: bun .\cmd\build-all.ts
 
-      - name: Package and verify ${{ inputs.cpu_target }} optimized standalone Release executable
+      - name: Package and verify ${{ matrix.cpu_target }} optimized standalone Release executable
         id: package
         shell: pwsh
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-          CPU_TARGET: ${{ inputs.cpu_target }}
+          CPU_TARGET: ${{ matrix.cpu_target }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -182,50 +179,133 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create or update GitHub pre-release
-        shell: pwsh
+  publish:
+    name: Publish one combined GitHub pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download generic and AVX2 packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: sumatrapdf-*-windows-x64-*-release-optimized
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify packages and create or update one GitHub pre-release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          ASSET: ${{ steps.package.outputs.asset }}
-          ASSET_NAME: ${{ steps.package.outputs.asset_name }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
-          CHECKSUM: ${{ steps.package.outputs.checksum }}
-          SHORT_SHA: ${{ steps.package.outputs.short_sha }}
-          FILE_VERSION: ${{ steps.package.outputs.version }}
-          CPU_TARGET: ${{ inputs.cpu_target }}
         run: |
-          $ErrorActionPreference = "Stop"
+          set -euo pipefail
 
-          $cpuSuffix = if ($env:CPU_TARGET -eq "avx2") { "-avx2" } else { "" }
-          $cpuTitle = if ($env:CPU_TARGET -eq "avx2") { "AVX2 optimized" } else { "optimized" }
-          $archFlag = if ($env:CPU_TARGET -eq "avx2") { " /arch:AVX2" } else { "" }
-          $compatibility = if ($env:CPU_TARGET -eq "avx2") {
-            "This build requires a processor with AVX2 support."
-          } else {
-            "This build uses the portable Windows x64 CPU baseline."
-          }
-          $tag = "sumatrapdf-master-$env:SHORT_SHA$cpuSuffix-optimized"
-          $title = "SumatraPDF master $env:SHORT_SHA ($cpuTitle Windows x64 Release)"
-          $notes = @"
-          Automated Windows x64 Release build from the official SumatraPDF master branch.
+          short_sha="${SOURCE_SHA:0:7}"
+          generic="SumatraPDF-$short_sha-windows-x64-release-optimized"
+          avx2="SumatraPDF-$short_sha-windows-x64-avx2-release-optimized"
+          combined_sums="SumatraPDF-$short_sha-windows-x64-optimized-SHA256SUMS.txt"
+          tag="sumatrapdf-master-$short_sha-optimized"
+          title="SumatraPDF master $short_sha (optimized Windows x64 Releases)"
 
-          Source commit: $env:SOURCE_SHA
-          File version: $env:FILE_VERSION
+          cd release-assets
+
+          expected=(
+            "$generic.exe"
+            "$generic.7z"
+            "$generic-SHA256SUMS.txt"
+            "$avx2.exe"
+            "$avx2.7z"
+            "$avx2-SHA256SUMS.txt"
+          )
+
+          for file in "${expected[@]}"; do
+            if [[ ! -s "$file" ]]; then
+              echo "::error::Expected package file is missing or empty: $file"
+              exit 1
+            fi
+          done
+
+          sha256sum -c "$generic-SHA256SUMS.txt"
+          sha256sum -c "$avx2-SHA256SUMS.txt"
+
+          sha256sum \
+            "$generic.exe" \
+            "$generic.7z" \
+            "$avx2.exe" \
+            "$avx2.7z" > "$combined_sums"
+
+          rm "$generic-SHA256SUMS.txt" "$avx2-SHA256SUMS.txt"
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Automated optimized Windows x64 Release builds from the official SumatraPDF master branch.
+
+          Source commit: $SOURCE_SHA
           Build configuration: Release|x64 (not Debug)
-          CPU target: $env:CPU_TARGET
-          Compiler optimization: /O1 /GL /Gy /GF /Gw /Zc:inline$archFlag
-          Link optimization: /LTCG /OPT:REF /OPT:ICF=10
+          Common optimization: /O1 /GL /Gy /GF /Gw /Zc:inline and /LTCG /OPT:REF /OPT:ICF=10
 
-          $compatibility
+          Assets in this release:
+          - Generic optimized x64: portable Windows x64 CPU baseline.
+          - AVX2 optimized x64: requires a processor with AVX2 support.
 
-          The executable is the standalone static build. The 7z asset uses maximum LZMA2 compression for the smallest download. Verify either file with SHA256SUMS.
-          "@
+          Both executables are standalone static builds. The 7z assets use maximum LZMA2 compression. Verify all files with the combined SHA256SUMS asset.
+          EOF
 
-          if (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null) {
-            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes $notes --prerelease
-            gh release upload $tag $env:ASSET $env:ARCHIVE $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --clobber
+          desired=(
+            "$generic.exe"
+            "$generic.7z"
+            "$avx2.exe"
+            "$avx2.7z"
+            "$combined_sums"
+          )
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease
+
+            mapfile -t existing_assets < <(
+              gh release view "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json assets \
+                --jq '.assets[].name'
+            )
+
+            for existing in "${existing_assets[@]}"; do
+              keep=false
+              for wanted in "${desired[@]}"; do
+                if [[ "$existing" == "$wanted" ]]; then
+                  keep=true
+                  break
+                fi
+              done
+
+              if [[ "$keep" == "false" ]]; then
+                gh release delete-asset "$tag" "$existing" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --yes
+              fi
+            done
+
+            gh release upload "$tag" "${desired[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
           } else {
-            gh release create $tag $env:ASSET $env:ARCHIVE $env:CHECKSUM --repo $env:GITHUB_REPOSITORY --target $env:SOURCE_SHA --title $title --notes $notes --prerelease
-          }
+            gh release create "$tag" "${desired[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$SOURCE_SHA" \
+              --title "$title" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease
+          fi
+
+          {
+            echo "## Combined optimized Windows x64 Release"
+            echo
+            echo "- source: \`$SOURCE_SHA\`"
+            echo "- generic and AVX2 packages: verified"
+            echo "- release tag: \`$tag\`"
+            echo "- published assets: ${#desired[@]}"
+          } >> "$GITHUB_STEP_SUMMARY"
