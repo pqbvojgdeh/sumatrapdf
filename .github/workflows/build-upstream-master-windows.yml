@@ -202,7 +202,7 @@ jobs:
           avx2="SumatraPDF-$short_sha-windows-x64-avx2-release-optimized"
           combined_sums="SumatraPDF-$short_sha-windows-x64-optimized-SHA256SUMS.txt"
           tag="sumatrapdf-master-$short_sha-optimized"
-          title="SumatraPDF master $short_sha (optimized Windows x64 Releases)"
+          title="$short_sha"
 
           cd release-assets
 
