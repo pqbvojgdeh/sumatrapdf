@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          token: ${{ secrets.SYNC_PAT }}
 
       - name: Fetch official master and detect changes
         id: sync
