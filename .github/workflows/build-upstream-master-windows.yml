@@ -74,7 +74,7 @@ jobs:
           # more identical COMDATs without requiring a newer CPU at runtime.
           CL: /Gw /Zc:inline ${{ matrix.cpu_target == 'avx2' && '/arch:AVX2' || '' }}
           LINK: /OPT:REF /OPT:ICF=10 /LTCG
-        run: bun .\cmd\build-all.ts
+        run: bun .\cmd\build.ts -all
 
       - name: Package and verify ${{ matrix.cpu_target }} optimized Release archive
         id: package
