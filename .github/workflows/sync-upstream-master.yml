@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
   group: sync-official-upstream-master
@@ -16,9 +15,12 @@ concurrency:
 
 jobs:
   sync:
-    name: Mirror official master when changed
+    name: Mirror official master and check its release
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      official_sha: ${{ steps.sync.outputs.official_sha }}
+      build_needed: ${{ steps.release.outputs.build_needed }}
 
     steps:
       - name: Check out automation branch
@@ -46,9 +48,7 @@ jobs:
           echo "Current mirror SHA:  ${current_sha:-<missing>}"
           echo "official_sha=$official_sha" >> "$GITHUB_OUTPUT"
 
-          if [[ "$current_sha" == "$official_sha" ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
+          if [[ "$current_sha" != "$official_sha" ]]; then
             git push origin +refs/remotes/official/master:refs/heads/upstream-master
 
             mirrored_sha="$(
@@ -60,8 +60,6 @@ jobs:
               echo "::error::upstream-master does not match official master."
               exit 1
             fi
-
-            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -72,17 +70,74 @@ jobs:
             echo "- changed: $([[ "$current_sha" == "$official_sha" ]] && echo no || echo yes)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Start combined generic and AVX2 optimized Windows x64 Release build
-        if: steps.sync.outputs.changed == 'true'
+      - name: Check for a complete release of the mirrored commit
+        id: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.sync.outputs.official_sha }}
         run: |
           set -euo pipefail
 
-          gh workflow run build-upstream-master-windows.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$GITHUB_REF_NAME" \
-            -f "source_sha=${{ steps.sync.outputs.official_sha }}"
+          short_sha="${SOURCE_SHA:0:7}"
+          tag="sumatrapdf-master-$short_sha-optimized"
+          prefix="SumatraPDF-$short_sha-windows-x64"
+          release_json="$RUNNER_TEMP/upstream-release.json"
 
-          echo "Combined generic and AVX2 optimized Release build dispatched for ${{ steps.sync.outputs.official_sha }}."
+          # Resolve both lightweight and annotated tags to the source commit.
+          tag_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tagged_sha="$(awk '$2 ~ /\^\{\}$/ { peeled = $1 } { tag = $1 } END { print (peeled ? peeled : tag) }' <<< "$tag_refs")"
+          if [[ -n "$tagged_sha" && "$tagged_sha" != "$SOURCE_SHA" ]]; then
+            echo "::error::Release tag $tag points to a different source revision."
+            exit 1
+          fi
+
+          status="$(curl --silent --show-error --retry 2 --max-time 30 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --output "$release_json" --write-out '%{http_code}' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          case "$status" in
+            200)
+              if [[ "$tagged_sha" != "$SOURCE_SHA" ]]; then
+                echo "::error::Published release $tag has no matching Git tag."
+                exit 1
+              fi
+              complete="$(python3 - "$release_json" "$prefix" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          release = json.loads(Path(sys.argv[1]).read_text())
+          prefix = sys.argv[2]
+          expected = {
+              f'{prefix}-release-optimized.7z',
+              f'{prefix}-avx2-release-optimized.7z',
+              f'{prefix}-optimized-SHA256SUMS.txt',
+          }
+          uploaded = {asset['name'] for asset in release['assets']
+                      if asset['state'] == 'uploaded' and asset['size'] > 0}
+          print('true' if not release['draft'] and not release['prerelease'] and expected <= uploaded else 'false')
+          PY
+              )"
+              ;;
+            404) complete=false ;;
+            *)
+              echo "::error::Could not check release $tag (HTTP $status)."
+              exit 1
+              ;;
+          esac
+
+          if [[ "$complete" == true ]]; then
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            echo "- release: `$tag` already has both archives and checksums" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            echo "- release: `$tag` needs a Windows build" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.build_needed == 'true'
+    uses: ./.github/workflows/build-upstream-master-windows.yml
+    with:
+      source_sha: ${{ needs.sync.outputs.official_sha }}

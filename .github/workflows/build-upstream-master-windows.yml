@@ -3,6 +3,12 @@ name: Build upstream master Windows x64 optimized Releases
 run-name: Build generic and AVX2 optimized Releases for ${{ inputs.source_sha }}
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact commit from the mirrored official master branch.
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       source_sha:
@@ -243,13 +249,6 @@ jobs:
           )
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$tag" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$title" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --prerelease=false \
-              --latest
-
             mapfile -t existing_assets < <(
               gh release view "$tag" \
                 --repo "$GITHUB_REPOSITORY" \
@@ -276,6 +275,14 @@ jobs:
             gh release upload "$tag" "${desired[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber
+
+            gh release edit "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --draft=false \
+              --prerelease=false \
+              --latest
           else
             gh release create "$tag" "${desired[@]}" \
               --repo "$GITHUB_REPOSITORY" \
